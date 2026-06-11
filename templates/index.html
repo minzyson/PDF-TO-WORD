@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF → Word 변환기</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 20px;
+      padding: 48px 40px;
+      width: 100%;
+      max-width: 500px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+      text-align: center;
+    }
+
+    .icon { font-size: 56px; margin-bottom: 16px; }
+
+    h1 { font-size: 26px; color: #2d2d2d; margin-bottom: 8px; }
+
+    .subtitle { color: #888; font-size: 14px; margin-bottom: 32px; }
+
+    .drop-zone {
+      border: 2px dashed #c4b5fd;
+      border-radius: 14px;
+      padding: 40px 20px;
+      cursor: pointer;
+      transition: all 0.2s;
+      background: #faf7ff;
+      position: relative;
+    }
+
+    .drop-zone:hover, .drop-zone.dragover {
+      border-color: #7c3aed;
+      background: #f3eeff;
+    }
+
+    .drop-zone input[type="file"] {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+      width: 100%;
+      height: 100%;
+    }
+
+    .drop-icon { font-size: 36px; margin-bottom: 12px; }
+
+    .drop-text { color: #555; font-size: 15px; }
+    .drop-text span { color: #7c3aed; font-weight: 600; }
+
+    .drop-hint { color: #aaa; font-size: 12px; margin-top: 8px; }
+
+    .file-selected {
+      display: none;
+      margin-top: 20px;
+      background: #f0fdf4;
+      border: 1px solid #86efac;
+      border-radius: 10px;
+      padding: 12px 16px;
+      font-size: 14px;
+      color: #166534;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .file-selected.show { display: flex; }
+
+    .file-name { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .btn-convert {
+      display: none;
+      margin-top: 24px;
+      width: 100%;
+      padding: 14px;
+      background: linear-gradient(135deg, #7c3aed, #6d28d9);
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+
+    .btn-convert.show { display: block; }
+    .btn-convert:hover { opacity: 0.92; transform: translateY(-1px); }
+    .btn-convert:active { transform: translateY(0); }
+    .btn-convert:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+    .progress-wrap {
+      display: none;
+      margin-top: 20px;
+      text-align: left;
+    }
+
+    .progress-wrap.show { display: block; }
+
+    .progress-label {
+      font-size: 13px;
+      color: #555;
+      margin-bottom: 8px;
+    }
+
+    .progress-bar-bg {
+      background: #e9d5ff;
+      border-radius: 99px;
+      height: 8px;
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #7c3aed, #a855f7);
+      border-radius: 99px;
+      width: 0%;
+      transition: width 0.4s ease;
+      animation: pulse-bar 1.2s ease-in-out infinite;
+    }
+
+    @keyframes pulse-bar {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+
+    .result {
+      display: none;
+      margin-top: 20px;
+      padding: 16px;
+      border-radius: 12px;
+      font-size: 14px;
+    }
+
+    .result.success {
+      display: block;
+      background: #f0fdf4;
+      border: 1px solid #86efac;
+      color: #166534;
+    }
+
+    .result.error {
+      display: block;
+      background: #fef2f2;
+      border: 1px solid #fca5a5;
+      color: #991b1b;
+    }
+
+    .btn-reset {
+      margin-top: 16px;
+      background: none;
+      border: 1px solid #c4b5fd;
+      color: #7c3aed;
+      padding: 8px 20px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: background 0.2s;
+    }
+
+    .btn-reset:hover { background: #f3eeff; }
+
+    footer { margin-top: 32px; color: #bbb; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">📄</div>
+    <h1>PDF → Word 변환기</h1>
+    <p class="subtitle">PDF 파일을 편집 가능한 Word(.docx) 파일로 변환합니다</p>
+
+    <div class="drop-zone" id="dropZone">
+      <input type="file" id="fileInput" accept=".pdf" />
+      <div class="drop-icon">📂</div>
+      <p class="drop-text"><span>클릭</span>하거나 PDF를 여기에 드래그하세요</p>
+      <p class="drop-hint">최대 50MB · PDF 파일만 가능</p>
+    </div>
+
+    <div class="file-selected" id="fileSelected">
+      <span>📎</span>
+      <span class="file-name" id="fileName"></span>
+    </div>
+
+    <button class="btn-convert" id="btnConvert">Word로 변환하기</button>
+
+    <div class="progress-wrap" id="progressWrap">
+      <p class="progress-label" id="progressLabel">변환 중... 잠시 기다려 주세요</p>
+      <div class="progress-bar-bg">
+        <div class="progress-bar" id="progressBar"></div>
+      </div>
+    </div>
+
+    <div class="result" id="result"></div>
+    <button class="btn-reset" id="btnReset" style="display:none">다시 변환하기</button>
+
+    <footer>파일은 변환 후 서버에서 즉시 삭제됩니다</footer>
+  </div>
+
+  <script>
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const fileSelected = document.getElementById('fileSelected');
+    const fileName = document.getElementById('fileName');
+    const btnConvert = document.getElementById('btnConvert');
+    const progressWrap = document.getElementById('progressWrap');
+    const progressBar = document.getElementById('progressBar');
+    const progressLabel = document.getElementById('progressLabel');
+    const result = document.getElementById('result');
+    const btnReset = document.getElementById('btnReset');
+
+    let selectedFile = null;
+
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+      const file = e.dataTransfer.files[0];
+      if (file) handleFile(file);
+    });
+
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files[0]) handleFile(fileInput.files[0]);
+    });
+
+    function handleFile(file) {
+      if (!file.name.toLowerCase().endsWith('.pdf')) {
+        showResult('error', 'PDF 파일만 업로드 가능합니다.');
+        return;
+      }
+      selectedFile = file;
+      fileName.textContent = file.name;
+      fileSelected.classList.add('show');
+      btnConvert.classList.add('show');
+      result.className = 'result';
+      result.textContent = '';
+      btnReset.style.display = 'none';
+    }
+
+    btnConvert.addEventListener('click', async () => {
+      if (!selectedFile) return;
+
+      btnConvert.disabled = true;
+      progressWrap.classList.add('show');
+      result.className = 'result';
+      btnReset.style.display = 'none';
+
+      // Animate progress bar during upload/convert
+      let progress = 0;
+      const interval = setInterval(() => {
+        progress = Math.min(progress + Math.random() * 8, 85);
+        progressBar.style.width = progress + '%';
+      }, 300);
+
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+
+      try {
+        const res = await fetch('/convert', { method: 'POST', body: formData });
+
+        clearInterval(interval);
+        progressBar.style.width = '100%';
+        progressLabel.textContent = '완료!';
+
+        if (!res.ok) {
+          const data = await res.json();
+          showResult('error', data.error || '변환 중 오류가 발생했습니다.');
+          return;
+        }
+
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const outName = selectedFile.name.replace(/\.pdf$/i, '.docx');
+        a.href = url;
+        a.download = outName;
+        a.click();
+        URL.revokeObjectURL(url);
+
+        showResult('success', `✅ 변환 완료! "${outName}" 다운로드가 시작됩니다.`);
+      } catch (err) {
+        clearInterval(interval);
+        showResult('error', '서버 연결에 실패했습니다. 다시 시도해 주세요.');
+      } finally {
+        btnConvert.disabled = false;
+        progressWrap.classList.remove('show');
+        progressBar.style.width = '0%';
+        progressLabel.textContent = '변환 중... 잠시 기다려 주세요';
+        btnReset.style.display = 'inline-block';
+      }
+    });
+
+    btnReset.addEventListener('click', () => {
+      selectedFile = null;
+      fileInput.value = '';
+      fileSelected.classList.remove('show');
+      btnConvert.classList.remove('show');
+      result.className = 'result';
+      result.textContent = '';
+      btnReset.style.display = 'none';
+    });
+
+    function showResult(type, msg) {
+      result.className = `result ${type}`;
+      result.textContent = msg;
+    }
+  </script>
+</body>
+</html>
