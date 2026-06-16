@@ -151,17 +151,17 @@
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
 
-  const dropZone    = document.getElementById('dropZone');
-  const fileInput   = document.getElementById('fileInput');
-  const fileInfo    = document.getElementById('fileInfo');
-  const fileName    = document.getElementById('fileName');
-  const btnConvert  = document.getElementById('btnConvert');
+  const dropZone      = document.getElementById('dropZone');
+  const fileInput     = document.getElementById('fileInput');
+  const fileInfo      = document.getElementById('fileInfo');
+  const fileName      = document.getElementById('fileName');
+  const btnConvert    = document.getElementById('btnConvert');
   const progressWrap  = document.getElementById('progressWrap');
   const progressBar   = document.getElementById('progressBar');
   const progressLabel = document.getElementById('progressLabel');
-  const result      = document.getElementById('result');
-  const btnReset    = document.getElementById('btnReset');
-  const ocrNotice   = document.getElementById('ocrNotice');
+  const result        = document.getElementById('result');
+  const btnReset      = document.getElementById('btnReset');
+  const ocrNotice     = document.getElementById('ocrNotice');
 
   let selectedFile = null;
 
@@ -190,7 +190,7 @@
     if (!selectedFile) return;
     btnConvert.disabled = true;
     progressWrap.classList.add('show');
-    setProgress(0, '텍스트 추출 중...');
+    setProgress(0, '페이지 분석 중...');
 
     let arrayBuffer = null;
     try {
@@ -199,7 +199,7 @@
       selectedFile = null;
       fileInput.value = '';
 
-      const pages = await extractText(arrayBuffer);
+      const pages = await extractContent(arrayBuffer);
       arrayBuffer = null;
 
       setProgress(70, 'Word 파일 생성 중...');
@@ -244,15 +244,23 @@
     result.textContent = msg;
   }
 
-  // PDF에서 텍스트 추출 (일반 + OCR 자동 전환)
-  async function extractText(arrayBuffer) {
+  // ─────────────────────────────────────────────
+  // 1. 페이지별 텍스트 + 이미지 추출
+  //    반환값: { type:'text', text } | { type:'image', base64, width, height }
+  //    의 배열을 페이지별로 담은 2차원 배열
+  // ─────────────────────────────────────────────
+  async function extractContent(arrayBuffer) {
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
     const pages = [];
     let totalChars = 0;
+    const pdfPageRefs = [];
 
     for (let i = 1; i <= pdf.numPages; i++) {
-      setProgress(Math.round((i / pdf.numPages) * 50), `텍스트 추출 중... (${i}/${pdf.numPages} 페이지)`);
+      setProgress(Math.round((i / pdf.numPages) * 55), `페이지 분석 중... (${i}/${pdf.numPages})`);
       const page = await pdf.getPage(i);
+      pdfPageRefs.push(page);
+
+      // 텍스트 추출
       const content = await page.getTextContent();
       const lineMap = {};
       content.items.forEach(item => {
@@ -261,67 +269,179 @@
         if (!lineMap[y]) lineMap[y] = [];
         lineMap[y].push(item.str);
       });
-      const lines = Object.keys(lineMap)
+      const textLines = Object.keys(lineMap)
         .map(Number).sort((a, b) => b - a)
         .map(y => lineMap[y].join(''))
         .filter(line => line.trim() !== '');
-      totalChars += lines.join('').length;
-      pages.push({ page, lines });
+
+      totalChars += textLines.join('').length;
+
+      // 이미지 추출
+      const imgs = await extractPageImages(page);
+
+      pages.push([
+        ...textLines.map(t => ({ type: 'text', text: t })),
+        ...imgs,
+      ]);
     }
 
-    // 텍스트가 없으면 OCR로 자동 전환
+    // 텍스트가 전혀 없으면 OCR 모드로 전환
     if (totalChars === 0) {
       ocrNotice.classList.add('show');
-      return await extractTextOCR(pdf, pages.map(p => p.page));
+      return await extractTextOCR(pdfPageRefs);
     }
 
-    return pages.map(p => p.lines);
+    return pages;
   }
 
-  // OCR로 스캔 PDF 텍스트 추출
-  async function extractTextOCR(pdf, pdfPages) {
+  // ─────────────────────────────────────────────
+  // 2. 한 페이지에서 임베드 이미지 추출
+  // ─────────────────────────────────────────────
+  async function extractPageImages(page) {
+    const images = [];
+    try {
+      const ops = pdfjsLib.OPS;
+      if (!ops) return images;
+
+      const paintOps = new Set(
+        [ops.paintImageXObject, ops.paintJpegXObject, ops.paintImageXObjectRepeat].filter(Boolean)
+      );
+      if (paintOps.size === 0) return images;
+
+      const operatorList = await page.getOperatorList();
+      const seenNames = new Set();
+
+      for (let j = 0; j < operatorList.fnArray.length; j++) {
+        if (!paintOps.has(operatorList.fnArray[j])) continue;
+        const name = operatorList.argsArray[j][0];
+        if (!name || seenNames.has(name)) continue;
+        seenNames.add(name);
+
+        try {
+          const imgData = await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('timeout')), 5000);
+            page.objs.get(name, data => { clearTimeout(timer); resolve(data); });
+          });
+
+          const converted = convertImgData(imgData);
+          if (converted && converted.width >= 10 && converted.height >= 10) {
+            images.push({ type: 'image', ...converted });
+          }
+        } catch (e) {
+          console.warn('이미지 변환 실패:', name, e);
+        }
+      }
+    } catch (e) {
+      console.warn('이미지 목록 추출 오류:', e);
+    }
+    return images;
+  }
+
+  // PDF.js가 반환하는 다양한 이미지 형식을 canvas → base64 PNG로 변환
+  function convertImgData(imgData) {
+    if (!imgData) return null;
+    try {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+
+      // ImageBitmap 직접 전달
+      if (imgData instanceof ImageBitmap) {
+        canvas.width = imgData.width;
+        canvas.height = imgData.height;
+        ctx.drawImage(imgData, 0, 0);
+        return toResult(canvas, imgData.width, imgData.height);
+      }
+
+      // { bitmap: ImageBitmap } 래퍼
+      if (imgData.bitmap instanceof ImageBitmap) {
+        const b = imgData.bitmap;
+        canvas.width = b.width;
+        canvas.height = b.height;
+        ctx.drawImage(b, 0, 0);
+        return toResult(canvas, b.width, b.height);
+      }
+
+      // { data: Uint8Array|Uint8ClampedArray, width, height }
+      if (imgData.data && imgData.width && imgData.height) {
+        const { width, height } = imgData;
+        canvas.width = width;
+        canvas.height = height;
+        const id = ctx.createImageData(width, height);
+        const src = imgData.data;
+
+        if (src.length === width * height * 4) {
+          // RGBA
+          id.data.set(src);
+        } else if (src.length === width * height * 3) {
+          // RGB → RGBA
+          for (let i = 0; i < width * height; i++) {
+            id.data[i*4]   = src[i*3];
+            id.data[i*4+1] = src[i*3+1];
+            id.data[i*4+2] = src[i*3+2];
+            id.data[i*4+3] = 255;
+          }
+        } else if (src.length === width * height) {
+          // 그레이스케일
+          for (let i = 0; i < width * height; i++) {
+            id.data[i*4] = id.data[i*4+1] = id.data[i*4+2] = src[i];
+            id.data[i*4+3] = 255;
+          }
+        } else {
+          return null;
+        }
+        ctx.putImageData(id, 0, 0);
+        return toResult(canvas, width, height);
+      }
+    } catch (e) {
+      console.warn('imgData 변환 오류:', e);
+    }
+    return null;
+  }
+
+  function toResult(canvas, width, height) {
+    return { base64: canvas.toDataURL('image/png').split(',')[1], width, height };
+  }
+
+  // ─────────────────────────────────────────────
+  // 3. OCR 모드 (스캔 PDF — 텍스트 없음)
+  //    extractContent 와 동일한 형식으로 반환
+  // ─────────────────────────────────────────────
+  async function extractTextOCR(pdfPages) {
     if (typeof Tesseract === 'undefined') {
       throw new Error('OCR 라이브러리가 로드되지 않았습니다. F5로 새로고침 후 다시 시도해주세요.');
     }
 
     setProgress(5, 'OCR 엔진 초기화 중...');
-
     const logger = m => {
       if (m.status === 'loading language traineddata') {
-        setProgress(Math.round((m.progress || 0) * 15),
-          `한국어 데이터 다운로드 중... ${Math.round((m.progress || 0) * 100)}%`);
+        setProgress(
+          Math.round((m.progress || 0) * 15),
+          `한국어 데이터 다운로드 중... ${Math.round((m.progress || 0) * 100)}%`
+        );
       }
       if (m.status === 'initializing tesseract') setProgress(16, 'OCR 엔진 준비 중...');
     };
 
-    // 경로를 자동 감지하게 두고 langPath만 지정
     let worker = null;
     try {
       worker = await Tesseract.createWorker('kor+eng', 1, {
-        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
-        logger,
+        langPath: 'https://tessdata.projectnaptha.com/4.0.0', logger,
       });
-    } catch (e) {
-      console.warn('1차 시도 실패:', e);
-    }
+    } catch (e) { console.warn('1차 시도 실패:', e); }
 
-    // 실패 시 영어만으로 재시도
     if (!worker) {
       try {
         worker = await Tesseract.createWorker('eng', 1, {
-          langPath: 'https://tessdata.projectnaptha.com/4.0.0',
-          logger,
+          langPath: 'https://tessdata.projectnaptha.com/4.0.0', logger,
         });
-      } catch (e) {
-        console.warn('2차 시도 실패:', e);
-      }
+      } catch (e) { console.warn('2차 시도 실패:', e); }
     }
 
     if (!worker) {
       throw new Error('OCR 엔진 초기화에 실패했습니다. 페이지를 새로고침(F5) 후 다시 시도해주세요.');
     }
 
-    const result = [];
+    const pages = [];
     try {
       for (let i = 0; i < pdfPages.length; i++) {
         const pct = 20 + Math.round(((i + 1) / pdfPages.length) * 65);
@@ -335,53 +455,92 @@
 
         const { data: { text } } = await worker.recognize(canvas);
         const lines = text.split('\n').filter(l => l.trim() !== '');
-        result.push(lines);
+        pages.push(lines.map(t => ({ type: 'text', text: t })));
       }
     } finally {
       await worker.terminate();
     }
 
-    return result;
+    return pages;
   }
 
-  // JSZip으로 .docx 파일 직접 생성 (외부 라이브러리 불필요)
+  // ─────────────────────────────────────────────
+  // 4. .docx 생성 (텍스트 + 이미지 혼합)
+  // ─────────────────────────────────────────────
   async function buildDocx(pages) {
     const zip = new JSZip();
+    const imageRegistry = []; // { relId, filename }
+    let imgCounter = 0;
 
+    // 이미지에 ID 부여 후 word/media/ 에 추가
+    const processedPages = pages.map(items =>
+      items.map(item => {
+        if (item.type !== 'image') return item;
+        imgCounter++;
+        const relId    = `rId${imgCounter + 1}`; // rId1 = settings.xml
+        const filename = `image${imgCounter}.png`;
+        imageRegistry.push({ relId, filename });
+        zip.file(`word/media/${filename}`, item.base64, { base64: true });
+        return { type: 'image', relId, imgId: imgCounter, width: item.width, height: item.height };
+      })
+    );
+
+    // [Content_Types].xml
     zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
   <Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>
 </Types>`);
 
+    // _rels/.rels
     zip.file('_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
 </Relationships>`);
 
-    zip.file('word/_rels/document.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    // word/_rels/document.xml.rels (settings + 이미지 관계)
+    let docRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>
-</Relationships>`);
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>`;
+    imageRegistry.forEach(img => {
+      docRels += `\n  <Relationship Id="${img.relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/${img.filename}"/>`;
+    });
+    docRels += `\n</Relationships>`;
+    zip.file('word/_rels/document.xml.rels', docRels);
 
+    // word/settings.xml
     zip.file('word/settings.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>`);
 
-    // 본문 XML 생성
+    // word/document.xml 본문 생성
+    const MAX_EMU  = 5486400; // 최대 너비 ~6인치
+    const PX_TO_EMU = 9525;  // 96dpi 기준 1px = 9525 EMU
+
     let bodyXml = '';
-    pages.forEach((lines, pageIdx) => {
-      lines.forEach(line => {
-        bodyXml += `<w:p><w:r><w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r></w:p>\n`;
+    processedPages.forEach((items, pageIdx) => {
+      items.forEach(item => {
+        if (item.type === 'text') {
+          bodyXml += `<w:p><w:r><w:t xml:space="preserve">${escapeXml(item.text)}</w:t></w:r></w:p>\n`;
+        } else if (item.type === 'image') {
+          const cx = Math.min(item.width * PX_TO_EMU, MAX_EMU);
+          const cy = Math.round(cx * item.height / item.width);
+          bodyXml += makeImageXml(item.relId, item.imgId, cx, cy);
+        }
       });
-      if (pageIdx < pages.length - 1) {
+      if (pageIdx < processedPages.length - 1) {
         bodyXml += `<w:p><w:r><w:br w:type="page"/></w:r></w:p>\n`;
       }
     });
 
     zip.file('word/document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
   <w:body>
 ${bodyXml}    <w:sectPr/>
   </w:body>
@@ -389,25 +548,58 @@ ${bodyXml}    <w:sectPr/>
 
     return zip.generateAsync({
       type: 'blob',
-      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     });
   }
 
-  // 저장 위치 직접 선택 (Chrome/Edge) 또는 자동 다운로드 (그 외)
+  // Word 인라인 이미지 XML (OOXML DrawingML)
+  function makeImageXml(relId, imgId, cx, cy) {
+    return `<w:p><w:r><w:drawing>
+  <wp:inline distT="0" distB="0" distL="0" distR="0">
+    <wp:extent cx="${cx}" cy="${cy}"/>
+    <wp:effectExtent l="0" t="0" r="0" b="0"/>
+    <wp:docPr id="${imgId}" name="Picture ${imgId}"/>
+    <wp:cNvGraphicFramePr>
+      <a:graphicFrameLocks noChangeAspect="1"/>
+    </wp:cNvGraphicFramePr>
+    <a:graphic>
+      <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:pic>
+          <pic:nvPicPr>
+            <pic:cNvPr id="${imgId}" name="Picture ${imgId}"/>
+            <pic:cNvPicPr><a:picLocks noChangeAspect="1"/></pic:cNvPicPr>
+          </pic:nvPicPr>
+          <pic:blipFill>
+            <a:blip r:embed="${relId}"/>
+            <a:stretch><a:fillRect/></a:stretch>
+          </pic:blipFill>
+          <pic:spPr>
+            <a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>
+            <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+          </pic:spPr>
+        </pic:pic>
+      </a:graphicData>
+    </a:graphic>
+  </wp:inline>
+</w:drawing></w:r></w:p>\n`;
+  }
+
+  // ─────────────────────────────────────────────
+  // 5. 저장
+  // ─────────────────────────────────────────────
   async function saveFile(blob, filename) {
     if (window.showSaveFilePicker) {
       const handle = await window.showSaveFilePicker({
         suggestedName: filename,
         types: [{
           description: 'Word 문서',
-          accept: { 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'] }
-        }]
+          accept: { 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'] },
+        }],
       });
       const writable = await handle.createWritable();
       await writable.write(blob);
       await writable.close();
     } else {
-      // Firefox 등 fallback: 다운로드 폴더에 자동 저장
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = filename; a.click();
