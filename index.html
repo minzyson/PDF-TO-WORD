@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PDF → Word 변환기</title>
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.1.1/dist/tesseract.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 20px;
+      padding: 48px 40px;
+      width: 100%;
+      max-width: 500px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+      text-align: center;
+    }
+
+    .icon { font-size: 56px; margin-bottom: 16px; }
+    h1 { font-size: 26px; color: #2d2d2d; margin-bottom: 8px; }
+    .subtitle { color: #888; font-size: 14px; margin-bottom: 32px; }
+
+    .drop-zone {
+      border: 2px dashed #c4b5fd;
+      border-radius: 14px;
+      padding: 40px 20px;
+      cursor: pointer;
+      transition: all 0.2s;
+      background: #faf7ff;
+      position: relative;
+    }
+    .drop-zone:hover, .drop-zone.dragover { border-color: #7c3aed; background: #f3eeff; }
+    .drop-zone input[type="file"] {
+      position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+    }
+    .drop-icon { font-size: 36px; margin-bottom: 12px; }
+    .drop-text { color: #555; font-size: 15px; }
+    .drop-text span { color: #7c3aed; font-weight: 600; }
+    .drop-hint { color: #aaa; font-size: 12px; margin-top: 8px; }
+
+    .file-info {
+      display: none; margin-top: 16px;
+      background: #f0fdf4; border: 1px solid #86efac;
+      border-radius: 10px; padding: 10px 14px;
+      font-size: 14px; color: #166534;
+      align-items: center; gap: 8px;
+    }
+    .file-info.show { display: flex; }
+    .file-name { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .btn-convert {
+      display: none; margin-top: 20px; width: 100%;
+      padding: 14px;
+      background: linear-gradient(135deg, #7c3aed, #6d28d9);
+      color: #fff; border: none; border-radius: 12px;
+      font-size: 16px; font-weight: 600; cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+    }
+    .btn-convert.show { display: block; }
+    .btn-convert:hover { opacity: 0.9; transform: translateY(-1px); }
+    .btn-convert:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+    .progress-wrap { display: none; margin-top: 20px; }
+    .progress-wrap.show { display: block; }
+    .progress-label { font-size: 13px; color: #555; margin-bottom: 8px; text-align: left; }
+    .progress-bg { background: #e9d5ff; border-radius: 99px; height: 8px; overflow: hidden; }
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #7c3aed, #a855f7);
+      border-radius: 99px; width: 0%; transition: width 0.3s ease;
+    }
+
+    .result { display: none; margin-top: 16px; padding: 14px; border-radius: 12px; font-size: 14px; }
+    .result.success { display: block; background: #f0fdf4; border: 1px solid #86efac; color: #166534; }
+    .result.error   { display: block; background: #fef2f2; border: 1px solid #fca5a5; color: #991b1b; }
+
+    .btn-reset {
+      display: none; margin-top: 12px;
+      background: none; border: 1px solid #c4b5fd;
+      color: #7c3aed; padding: 8px 20px;
+      border-radius: 8px; cursor: pointer; font-size: 13px;
+    }
+    .btn-reset:hover { background: #f3eeff; }
+
+    .notice { margin-top: 24px; font-size: 12px; color: #bbb; line-height: 1.6; }
+
+    .ocr-notice {
+      display: none; margin-top: 16px; padding: 12px 16px;
+      background: #fffbeb; border: 1px solid #fcd34d;
+      border-radius: 10px; font-size: 13px; color: #92400e;
+      text-align: left; line-height: 1.6;
+    }
+    .ocr-notice.show { display: block; }
+    .ocr-notice strong { display: block; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">📄</div>
+  <h1>PDF → Word 변환기</h1>
+  <p class="subtitle">설치 없이 바로 변환 · 파일은 서버로 전송되지 않습니다</p>
+
+  <div class="drop-zone" id="dropZone">
+    <input type="file" id="fileInput" accept=".pdf" />
+    <div class="drop-icon">📂</div>
+    <p class="drop-text"><span>클릭</span>하거나 PDF를 여기에 드래그하세요</p>
+    <p class="drop-hint">PDF 파일만 가능 · 모든 처리는 내 브라우저에서만 진행됩니다</p>
+  </div>
+
+  <div class="file-info" id="fileInfo">
+    <span>📎</span>
+    <span class="file-name" id="fileName"></span>
+  </div>
+
+  <button class="btn-convert" id="btnConvert">Word로 변환 후 저장</button>
+
+  <div class="progress-wrap" id="progressWrap">
+    <p class="progress-label" id="progressLabel">변환 준비 중...</p>
+    <div class="progress-bg">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+  </div>
+
+  <div class="result" id="result"></div>
+  <button class="btn-reset" id="btnReset">다시 변환하기</button>
+
+  <div class="ocr-notice" id="ocrNotice">
+    <strong>⚠️ 스캔된 이미지 PDF 감지</strong>
+    OCR(문자 인식) 모드로 변환합니다.<br>
+    처음 실행 시 한국어 데이터 약 10MB 다운로드 후 페이지당 10~30초 소요됩니다.
+  </div>
+
+  <p class="notice">파일이 외부 서버로 전송되지 않아 개인정보가 안전합니다</p>
+</div>
+
+<script>
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+
+  const dropZone    = document.getElementById('dropZone');
+  const fileInput   = document.getElementById('fileInput');
+  const fileInfo    = document.getElementById('fileInfo');
+  const fileName    = document.getElementById('fileName');
+  const btnConvert  = document.getElementById('btnConvert');
+  const progressWrap  = document.getElementById('progressWrap');
+  const progressBar   = document.getElementById('progressBar');
+  const progressLabel = document.getElementById('progressLabel');
+  const result      = document.getElementById('result');
+  const btnReset    = document.getElementById('btnReset');
+  const ocrNotice   = document.getElementById('ocrNotice');
+
+  let selectedFile = null;
+
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault(); dropZone.classList.remove('dragover');
+    if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', () => { if (fileInput.files[0]) handleFile(fileInput.files[0]); });
+
+  function handleFile(file) {
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      showResult('error', 'PDF 파일만 가능합니다.'); return;
+    }
+    selectedFile = file;
+    fileName.textContent = file.name;
+    fileInfo.classList.add('show');
+    btnConvert.classList.add('show');
+    result.className = 'result';
+    ocrNotice.classList.remove('show');
+    btnReset.style.display = 'none';
+  }
+
+  btnConvert.addEventListener('click', async () => {
+    if (!selectedFile) return;
+    btnConvert.disabled = true;
+    progressWrap.classList.add('show');
+    setProgress(0, '텍스트 추출 중...');
+
+    let arrayBuffer = null;
+    try {
+      arrayBuffer = await selectedFile.arrayBuffer();
+      const originalName = selectedFile.name;
+      selectedFile = null;
+      fileInput.value = '';
+
+      const pages = await extractText(arrayBuffer);
+      arrayBuffer = null;
+
+      setProgress(70, 'Word 파일 생성 중...');
+      const blob = await buildDocx(pages);
+
+      setProgress(90, '저장 중...');
+      await saveFile(blob, originalName.replace(/\.pdf$/i, '.docx'));
+
+      setProgress(100, '완료!');
+      showResult('success', '✅ 변환 완료! 파일이 저장되었습니다.');
+    } catch (e) {
+      arrayBuffer = null;
+      if (e.name === 'AbortError') {
+        showResult('error', '저장이 취소되었습니다.');
+      } else {
+        showResult('error', '변환 실패: ' + (e.message || String(e) || '알 수 없는 오류'));
+      }
+    } finally {
+      btnConvert.disabled = false;
+      progressWrap.classList.remove('show');
+      btnReset.style.display = 'inline-block';
+    }
+  });
+
+  btnReset.addEventListener('click', () => {
+    selectedFile = null;
+    fileInput.value = '';
+    fileInfo.classList.remove('show');
+    btnConvert.classList.remove('show');
+    ocrNotice.classList.remove('show');
+    result.className = 'result';
+    btnReset.style.display = 'none';
+  });
+
+  function setProgress(pct, label) {
+    progressBar.style.width = pct + '%';
+    progressLabel.textContent = label;
+  }
+
+  function showResult(type, msg) {
+    result.className = 'result ' + type;
+    result.textContent = msg;
+  }
+
+  // PDF에서 텍스트 추출 (일반 + OCR 자동 전환)
+  async function extractText(arrayBuffer) {
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    const pages = [];
+    let totalChars = 0;
+
+    for (let i = 1; i <= pdf.numPages; i++) {
+      setProgress(Math.round((i / pdf.numPages) * 50), `텍스트 추출 중... (${i}/${pdf.numPages} 페이지)`);
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const lineMap = {};
+      content.items.forEach(item => {
+        if (!item.str) return;
+        const y = Math.round(item.transform[5]);
+        if (!lineMap[y]) lineMap[y] = [];
+        lineMap[y].push(item.str);
+      });
+      const lines = Object.keys(lineMap)
+        .map(Number).sort((a, b) => b - a)
+        .map(y => lineMap[y].join(''))
+        .filter(line => line.trim() !== '');
+      totalChars += lines.join('').length;
+      pages.push({ page, lines });
+    }
+
+    // 텍스트가 없으면 OCR로 자동 전환
+    if (totalChars === 0) {
+      ocrNotice.classList.add('show');
+      return await extractTextOCR(pdf, pages.map(p => p.page));
+    }
+
+    return pages.map(p => p.lines);
+  }
+
+  // OCR로 스캔 PDF 텍스트 추출
+  async function extractTextOCR(pdf, pdfPages) {
+    if (typeof Tesseract === 'undefined') {
+      throw new Error('OCR 라이브러리가 로드되지 않았습니다. F5로 새로고침 후 다시 시도해주세요.');
+    }
+
+    setProgress(5, 'OCR 엔진 초기화 중...');
+
+    const logger = m => {
+      if (m.status === 'loading language traineddata') {
+        setProgress(Math.round((m.progress || 0) * 15),
+          `한국어 데이터 다운로드 중... ${Math.round((m.progress || 0) * 100)}%`);
+      }
+      if (m.status === 'initializing tesseract') setProgress(16, 'OCR 엔진 준비 중...');
+    };
+
+    // 경로를 자동 감지하게 두고 langPath만 지정
+    let worker = null;
+    try {
+      worker = await Tesseract.createWorker('kor+eng', 1, {
+        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+        logger,
+      });
+    } catch (e) {
+      console.warn('1차 시도 실패:', e);
+    }
+
+    // 실패 시 영어만으로 재시도
+    if (!worker) {
+      try {
+        worker = await Tesseract.createWorker('eng', 1, {
+          langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+          logger,
+        });
+      } catch (e) {
+        console.warn('2차 시도 실패:', e);
+      }
+    }
+
+    if (!worker) {
+      throw new Error('OCR 엔진 초기화에 실패했습니다. 페이지를 새로고침(F5) 후 다시 시도해주세요.');
+    }
+
+    const result = [];
+    try {
+      for (let i = 0; i < pdfPages.length; i++) {
+        const pct = 20 + Math.round(((i + 1) / pdfPages.length) * 65);
+        setProgress(pct, `OCR 처리 중... (${i + 1}/${pdfPages.length} 페이지)`);
+
+        const canvas = document.createElement('canvas');
+        const viewport = pdfPages[i].getViewport({ scale: 2.0 });
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        await pdfPages[i].render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+
+        const { data: { text } } = await worker.recognize(canvas);
+        const lines = text.split('\n').filter(l => l.trim() !== '');
+        result.push(lines);
+      }
+    } finally {
+      await worker.terminate();
+    }
+
+    return result;
+  }
+
+  // JSZip으로 .docx 파일 직접 생성 (외부 라이브러리 불필요)
+  async function buildDocx(pages) {
+    const zip = new JSZip();
+
+    zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>
+</Types>`);
+
+    zip.file('_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`);
+
+    zip.file('word/_rels/document.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>
+</Relationships>`);
+
+    zip.file('word/settings.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>`);
+
+    // 본문 XML 생성
+    let bodyXml = '';
+    pages.forEach((lines, pageIdx) => {
+      lines.forEach(line => {
+        bodyXml += `<w:p><w:r><w:t xml:space="preserve">${escapeXml(line)}</w:t></w:r></w:p>\n`;
+      });
+      if (pageIdx < pages.length - 1) {
+        bodyXml += `<w:p><w:r><w:br w:type="page"/></w:r></w:p>\n`;
+      }
+    });
+
+    zip.file('word/document.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+${bodyXml}    <w:sectPr/>
+  </w:body>
+</w:document>`);
+
+    return zip.generateAsync({
+      type: 'blob',
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    });
+  }
+
+  // 저장 위치 직접 선택 (Chrome/Edge) 또는 자동 다운로드 (그 외)
+  async function saveFile(blob, filename) {
+    if (window.showSaveFilePicker) {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{
+          description: 'Word 문서',
+          accept: { 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'] }
+        }]
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+    } else {
+      // Firefox 등 fallback: 다운로드 폴더에 자동 저장
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  function escapeXml(str) {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  }
+</script>
+</body>
+</html>
